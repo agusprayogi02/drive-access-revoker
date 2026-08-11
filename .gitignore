@@ -1,0 +1,4 @@
+.venv
+credentials.json
+accounts.txt
+revoke.log
