@@ -38,43 +38,14 @@ def authenticate():
     return build('drive', 'v3', credentials=creds)
 
 def list_files(service, target_emails):
-    """Mencari file yang dibagikan kepada email target (sebagai reader, writer, dll)."""
-    print("Mengambil daftar file terfilter dari Google Drive...")
+    """Mencari semua file yang tidak ada di trash dan memproses penyaringan di sisi lokal script."""
+    print("Mengambil daftar seluruh file dari Drive (bisa memakan waktu beberapa saat)...")
     files = []
-    
-    # Kita buat query gabungan untuk mencari file di mana email target terlibat.
-    # Contoh query: trashed = false and ('email1' in readers or 'email1' in writers or 'email1' in owners or 'email2' in readers...)
-    # Batas panjang query string dari Google API adalah sekitar 8000 karakter, 
-    # jadi jika email sangat banyak kita bisa memecahnya. Namun untuk kasus ini, gabungan langsung sudah sangat efektif.
-    
-    email_queries = []
-    for email in target_emails:
-        email_clean = email.strip().lower()
-        if email_clean:
-            # Cari file di mana email target adalah reader atau writer (bukan owner)
-            email_queries.append(
-                f"'{email_clean}' in readers or "
-                f"'{email_clean}' in writers"
-            )
-            
-    if not email_queries:
-        return []
-        
-    # Gabungkan semua query email dengan OR
-    sub_query = " or ".join(f"({eq})" for eq in email_queries)
-    
-    # Kueri:
-    # 1. trashed = false (tidak di tempat sampah)
-    # 2. 'me' in owners (opsional, jika Anda ingin membatasi hanya file yang Anda miliki.
-    #    Namun agar Shared Drive milik perusahaan juga ikut terproses di mana Anda bukan owner langsung tetapi manager, 
-    #    kita cukup pastikan bahwa owner file BUKAN email target).
-    
-    # Buat filter agar pemilik (owners) file bukanlah email target
-    not_owner_queries = " and ".join(f"not '{email.strip().lower()}' in owners" for email in target_emails if email.strip())
-    
-    query = f"trashed = false and ({sub_query}) and ({not_owner_queries})"
-    
     page_token = None
+    
+    # Query aman yang pasti didukung API: abaikan file di Trash.
+    query = "trashed = false"
+    
     try:
         while True:
             response = service.files().list(
@@ -95,7 +66,32 @@ def list_files(service, target_emails):
         print(f"Terjadi kesalahan saat memanggil API: {error}")
         sys.exit(1)
         
-    return files
+    # Lakukan filter lokal secara ketat agar lebih presisi:
+    # Hanya cari file di mana email target bertindak sebagai reader/writer (bukan owner).
+    filtered_files = []
+    emails_lower = [email.lower().strip() for email in target_emails if email.strip()]
+    
+    for file in files:
+        owners = file.get('owners', [])
+        # Pastikan tidak ada owner file yang menggunakan email target
+        target_is_owner = any(owner.get('emailAddress', '').lower() in emails_lower for owner in owners)
+        if target_is_owner:
+            continue
+            
+        # Cek apakah file ini memiliki akses dari salah satu target email
+        permissions = file.get('permissions', [])
+        has_target_access = False
+        for perm in permissions:
+            email_address = perm.get('emailAddress', '').lower()
+            role = perm.get('role')
+            if email_address in emails_lower and role in ['reader', 'commenter', 'writer']:
+                has_target_access = True
+                break
+                
+        if has_target_access:
+            filtered_files.append(file)
+            
+    return filtered_files
 
 def revoke_access(service, target_emails, dry_run=False):
     """Mengecek semua file dan mencabut hak akses untuk daftar email tertentu serta mencatatnya ke revoke.log."""
