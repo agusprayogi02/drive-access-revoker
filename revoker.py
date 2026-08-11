@@ -37,18 +37,44 @@ def authenticate():
             
     return build('drive', 'v3', credentials=creds)
 
-def list_files(service):
-    """Mencari file yang dibagikan dengan saya ATAU file milik saya yang dibagikan ke orang lain."""
-    print("Mengambil daftar file terfilter (bisa memakan waktu beberapa saat)...")
+def list_files(service, target_emails):
+    """Mencari file yang dibagikan kepada email target (sebagai reader, writer, dll)."""
+    print("Mengambil daftar file terfilter dari Google Drive...")
     files = []
+    
+    # Kita buat query gabungan untuk mencari file di mana email target terlibat.
+    # Contoh query: trashed = false and ('email1' in readers or 'email1' in writers or 'email1' in owners or 'email2' in readers...)
+    # Batas panjang query string dari Google API adalah sekitar 8000 karakter, 
+    # jadi jika email sangat banyak kita bisa memecahnya. Namun untuk kasus ini, gabungan langsung sudah sangat efektif.
+    
+    email_queries = []
+    for email in target_emails:
+        email_clean = email.strip().lower()
+        if email_clean:
+            # Cari file di mana email target adalah reader atau writer (bukan owner)
+            email_queries.append(
+                f"'{email_clean}' in readers or "
+                f"'{email_clean}' in writers"
+            )
+            
+    if not email_queries:
+        return []
+        
+    # Gabungkan semua query email dengan OR
+    sub_query = " or ".join(f"({eq})" for eq in email_queries)
+    
+    # Kueri:
+    # 1. trashed = false (tidak di tempat sampah)
+    # 2. 'me' in owners (opsional, jika Anda ingin membatasi hanya file yang Anda miliki.
+    #    Namun agar Shared Drive milik perusahaan juga ikut terproses di mana Anda bukan owner langsung tetapi manager, 
+    #    kita cukup pastikan bahwa owner file BUKAN email target).
+    
+    # Buat filter agar pemilik (owners) file bukanlah email target
+    not_owner_queries = " and ".join(f"not '{email.strip().lower()}' in owners" for email in target_emails if email.strip())
+    
+    query = f"trashed = false and ({sub_query}) and ({not_owner_queries})"
+    
     page_token = None
-    
-    # query:
-    # 1. sharedWithMe = true (file yang di-share orang lain ke saya)
-    # 2. shared = true (file milik saya atau di shared drive yang telah dibagikan ke pihak lain)
-    # 3. trashed = false (abaikan sampah)
-    query = "trashed = false and (sharedWithMe = true or shared = true)"
-    
     try:
         while True:
             response = service.files().list(
@@ -66,36 +92,14 @@ def list_files(service):
             if not page_token:
                 break
     except HttpError as error:
-        # Jika 'shared = true' gagal karena versi API atau keterbatasan tertentu,
-        # fallback menggunakan query trashed saja agar tetap berjalan.
-        print("Mencoba filter fallback karena kendala format query...")
-        files = []
-        page_token = None
-        query = "trashed = false"
-        try:
-            while True:
-                response = service.files().list(
-                    q=query,
-                    spaces='drive',
-                    fields='nextPageToken, files(id, name, owners, permissions)',
-                    pageToken=page_token,
-                    pageSize=100,
-                    supportsAllDrives=True,
-                    includeItemsFromAllDrives=True
-                ).execute()
-                files.extend(response.get('files', []))
-                page_token = response.get('nextPageToken', None)
-                if not page_token:
-                    break
-        except HttpError as fallback_error:
-            print(f"Terjadi kesalahan saat memanggil API: {fallback_error}")
-            sys.exit(1)
+        print(f"Terjadi kesalahan saat memanggil API: {error}")
+        sys.exit(1)
         
     return files
 
 def revoke_access(service, target_emails, dry_run=False):
     """Mengecek semua file dan mencabut hak akses untuk daftar email tertentu serta mencatatnya ke revoke.log."""
-    files = list_files(service)
+    files = list_files(service, target_emails)
     print(f"Total ditemukan {len(files)} file di Drive Anda.\n")
     
     emails_lower = [email.lower().strip() for email in target_emails if email.strip()]
