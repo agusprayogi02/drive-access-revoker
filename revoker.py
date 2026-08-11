@@ -38,13 +38,16 @@ def authenticate():
     return build('drive', 'v3', credentials=creds)
 
 def list_files(service):
-    """Mencari semua file yang dimiliki atau dibagikan oleh user."""
-    print("Mengambil daftar file dari Google Drive (bisa memakan waktu beberapa saat)...")
+    """Mencari file yang dibagikan dengan saya ATAU file milik saya yang dibagikan ke orang lain."""
+    print("Mengambil daftar file terfilter (bisa memakan waktu beberapa saat)...")
     files = []
     page_token = None
     
-    # Query untuk mencari file. Kita cari file yang tidak di-trash.
-    query = "trashed = false"
+    # query:
+    # 1. sharedWithMe = true (file yang di-share orang lain ke saya)
+    # 2. shared = true (file milik saya atau di shared drive yang telah dibagikan ke pihak lain)
+    # 3. trashed = false (abaikan sampah)
+    query = "trashed = false and (sharedWithMe = true or shared = true)"
     
     try:
         while True:
@@ -53,7 +56,9 @@ def list_files(service):
                 spaces='drive',
                 fields='nextPageToken, files(id, name, owners, permissions)',
                 pageToken=page_token,
-                pageSize=100
+                pageSize=100,
+                supportsAllDrives=True,
+                includeItemsFromAllDrives=True
             ).execute()
             
             files.extend(response.get('files', []))
@@ -61,8 +66,30 @@ def list_files(service):
             if not page_token:
                 break
     except HttpError as error:
-        print(f"Terjadi kesalahan saat memanggil API: {error}")
-        sys.exit(1)
+        # Jika 'shared = true' gagal karena versi API atau keterbatasan tertentu,
+        # fallback menggunakan query trashed saja agar tetap berjalan.
+        print("Mencoba filter fallback karena kendala format query...")
+        files = []
+        page_token = None
+        query = "trashed = false"
+        try:
+            while True:
+                response = service.files().list(
+                    q=query,
+                    spaces='drive',
+                    fields='nextPageToken, files(id, name, owners, permissions)',
+                    pageToken=page_token,
+                    pageSize=100,
+                    supportsAllDrives=True,
+                    includeItemsFromAllDrives=True
+                ).execute()
+                files.extend(response.get('files', []))
+                page_token = response.get('nextPageToken', None)
+                if not page_token:
+                    break
+        except HttpError as fallback_error:
+            print(f"Terjadi kesalahan saat memanggil API: {fallback_error}")
+            sys.exit(1)
         
     return files
 
